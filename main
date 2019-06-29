@@ -1,0 +1,168 @@
+from sklearn.preprocessing import MinMaxScaler
+from keras.models import load_model
+# from predictor_model import *
+from read_data import read_data, series_to_supervised
+import pickle
+from keras.callbacks import ModelCheckpoint
+from keras.models import Sequential
+from keras.layers import Dense, Bidirectional, Dropout, GlobalAveragePooling1D, Reshape
+from keras.layers import *
+import os
+
+
+def predictor_model_train(hidden_size, dense_layers, batch_size, epochs, model_dir, train_x, train_y, test_x, test_y
+                          , filters=None, kernel_size=None, pool_size=1, activation0='linear'
+                          , optimizer='adam', loss='mae'
+                          , activation1='tanh', activation2='linear', activation3='linear'):
+
+    if kernel_size is None:
+        kernel_size = [3]
+    if filters is None:
+        filters = [5]
+    os.makedirs(model_dir, exist_ok=True)
+
+    model = Sequential()
+    model.add(Conv1D(filters=filters[0], kernel_size=kernel_size[0], activation=activation0
+                     , input_shape=(train_x.shape[1], train_x.shape[2])))
+    filters.pop(0)
+    kernel_size.pop(0)
+    # model.add(MaxPool1D(pool_size=2))
+
+    for i in range(len(filters)):
+        model.add(Conv1D(filters=filters[i], kernel_size=kernel_size[i], activation=activation0))
+
+    # model.add(MaxPool1D(pool_size=pool_size))
+    # model.add(GlobalAveragePooling1D())
+    model.add(GlobalMaxPooling1D)
+    # model.add(Dropout(0.1))
+    # model.add(Flatten())
+    # model.add(Bidirectional(LSTM(hidden_size, input_shape=(train_x.shape[1], train_x.shape[2]), return_sequences=False
+    #                              , activation=activation1)))
+    model.add(Reshape([-1, 1]))
+    model.add(Bidirectional(LSTM(hidden_size, return_sequences=False, stateful=False
+                                 , activation=activation1)))
+    for d in dense_layers:
+        model.add(Dense(d, activation=activation2))
+    model.add(Dense(2, activation=activation3))
+    model.compile(optimizer=optimizer, loss=loss, metrics=['accuracy'])
+
+    filepath = model_dir + "/weights-improvement-{epoch:02d}-1.00.hdf5"
+    checkpoint = ModelCheckpoint(filepath, monitor='val_acc', verbose=1)
+    callbacks_list = [checkpoint]
+
+    history = model.fit(train_x, train_y, epochs=epochs, batch_size=batch_size, verbose=2, shuffle=False
+                        , validation_data=(test_x, test_y), callbacks=callbacks_list)
+
+    try:
+        with open(model_dir + '/trainHistoryDict.pickle', 'wb') as file_pi:
+            pickle.dump(history, file_pi)
+    except FileNotFoundError as ae:
+        print(ae)
+
+    return model
+
+
+def predict(model_dir, model, test_x, test_y, scaler, window_size):
+    # make a prediction
+    yhat = model.predict(test_x)
+    inv_yhat = scaler.inverse_transform(yhat)
+    # inv_yhat = inv_yhat[:, 0]
+    inv_yhat = inv_yhat.reshape(-1, 1)
+    inv_y = scaler.inverse_transform(test_y)
+    # inv_y = inv_y[:, 0]
+    inv_y = inv_y.reshape(-1, 1)
+    diff = abs(inv_y - inv_yhat)
+
+    accept = 0
+    reject = 0
+    for i in diff:
+        if i <= 10:
+            accept += 1
+        else:
+            reject += 1
+
+    return accept, reject
+
+
+
+window_size = 50
+
+scaler = MinMaxScaler(feature_range=(-1, 1))
+
+if os.getcwd().find('content') != -1:
+    current_dir = 'gdrive/My Drive/MMS_Colab/'
+else:
+    current_dir = os.getcwd() + "/"
+
+values = read_data(file_name=current_dir + 'Train_Data.csv')
+values = values[:, 0].reshape(-1, 2)
+scaled_values = scaler.fit_transform(values)
+train_data = series_to_supervised(scaled_values, n_in=window_size, n_out=1)
+train_data_size = len(train_data)
+
+values = read_data(file_name=current_dir + 'Test_Data.csv')
+values = values[:, 0].reshape(-1, 2)
+scaled_values = scaler.fit_transform(values)
+test_data = series_to_supervised(scaled_values, n_in=window_size, n_out=1)
+test_data_size = len(test_data)
+
+# values = read_data(file_name='Data.csv')
+# values = values[:, 0].reshape(-1, 2)
+# scaled_values = scaler.fit_transform(values)
+# data = series_to_supervised(scaled_values, n_in=window_size, n_out=2)
+# data_size = len(data)
+
+# train_x, train_y = train_data.values[:, :-4], train_data.values[:, [-4, -2]]
+train_x, train_y = train_data.values[:, :-2], train_data.values[:, [-2, -1]]
+train_x = train_x.reshape(train_data_size, window_size, 2)
+# test_x, test_y = test_data.values[:, :-4], test_data.values[:, [-4, -2]]
+test_x, test_y = test_data.values[:, :-2], test_data.values[:, [-2, -1]]
+test_x = test_x.reshape(test_data_size, window_size, 2)
+
+
+filters_list = [[50, 50, 50]]
+kernel_size_list = [[20, 20, 10]]
+hidden_size_list = [50]
+dense_layers = []
+pool_size = 1
+batch_size = 2000
+epochs = 30
+activation0 = 'tanh'
+for filters in filters_list:
+    for kernel_size in kernel_size_list:
+        for hidden_size in hidden_size_list:
+            model_dir = current_dir + 'models/8' + 'window' + str(window_size) + 'batch_size' + str(batch_size) + \
+                        'filters' + str(filters) + 'kernel_size' + str(kernel_size) \
+                        + 'hidden_size' + str(hidden_size) + 'dense' + str(dense_layers) + 'active0' + str(activation0)
+            while True:
+                if os.path.isfile(model_dir + '/weights-improvement-01-1.00.hdf5'):
+                    results_file = open(model_dir + '/results.txt', 'w')
+                    model = load_model(model_dir + '/weights-improvement-01-1.00.hdf5')
+                    results = [0.0]*epochs
+                    for i in range(1, epochs + 1):
+                        if os.path.isfile(model_dir + f"/weights-improvement-{i:02d}-1.00.hdf5"):
+                            model = load_model(model_dir + f"/weights-improvement-{i:02d}-1.00.hdf5")
+                            # print(f"Loaded \"weights-improvement-{i:02d}-1.00.hdf5\" file from disk")
+                            accept, reject = predict(model_dir=model_dir, window_size=window_size, model=model, test_x=test_x
+                                                     , test_y=test_y, scaler=scaler)
+                            accuracy = float(accept / (accept + reject))
+                            results[i - 1] = accuracy
+                            try:
+                                file_pi = open(model_dir + '/results.pickle', 'wb')
+                                pickle.dump(results, file_pi)
+                            except FileNotFoundError as ae:
+                                pass
+                            results_file.write(f'epoch {i:02d}:\n\taccpet: {accept:6d}\n\treject: {reject:6d}\n\taccuracy'
+                                               f':\t {accuracy:.6f}\n')
+                            print(f'epoch {i:02d}:\t {accuracy:.6f}')
+                    results_file.write("\n\n\nWindow size\t%d\nBatch size\t%d" % (window_size, batch_size))
+                    model.summary(print_fn=lambda x: results_file.write(x + '\n'))
+                    break
+                else:
+                    model = predictor_model_train(model_dir=model_dir, hidden_size=hidden_size, dense_layers=dense_layers
+                                                  , batch_size=batch_size, epochs=epochs, train_x=train_x
+                                                  , train_y=train_y, test_x=test_x, test_y=test_y, activation0=activation0
+                                                  , filters=filters, kernel_size=kernel_size, pool_size=pool_size)
+
+
+
